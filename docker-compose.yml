@@ -1,0 +1,100 @@
+version: '3.9'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    environment:
+      SA_PASSWORD: "Password123!"
+      ACCEPT_EULA: "Y"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqldata:/var/opt/mssql
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "Password123!" -Q "SELECT 1" || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+  identity-service:
+    build:
+      context: ./src/IdentityService
+      dockerfile: Dockerfile
+    container_name: identity-service
+    environment:
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=IdentityDb;User=sa;Password=Password123!;TrustServerCertificate=True"
+      Jwt__Secret: "super-secret-key-that-is-at-least-32-chars"
+      Jwt__Issuer: "IdentityService"
+      Jwt__Audience: "MicroservicesApp"
+    ports:
+      - "5001:80"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+
+  product-service:
+    build:
+      context: ./src/ProductService
+      dockerfile: Dockerfile
+    container_name: product-service
+    environment:
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=ProductDb;User=sa;Password=Password123!;TrustServerCertificate=True"
+      RabbitMq__Host: "rabbitmq"
+      Jwt__Secret: "super-secret-key-that-is-at-least-32-chars"
+      Jwt__Issuer: "IdentityService"
+    ports:
+      - "5002:80"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  order-service:
+    build:
+      context: ./src/OrderService
+      dockerfile: Dockerfile
+    container_name: order-service
+    environment:
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=OrderDb;User=sa;Password=Password123!;TrustServerCertificate=True"
+      RabbitMq__Host: "rabbitmq"
+      Jwt__Secret: "super-secret-key-that-is-at-least-32-chars"
+      Jwt__Issuer: "IdentityService"
+    ports:
+      - "5003:80"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src/ApiGateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - identity-service
+      - product-service
+      - order-service
+
+volumes:
+  sqldata:
